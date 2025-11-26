@@ -219,7 +219,7 @@ io.on('connection', (socket) => {
 
   // Iniciar juego
   socket.on('start_game', () => {
-    console.log(`🎮 start_game recibido de ${socket.playerId}`);
+    console.log(`🎮 start_game recibido de ${socket.playerId} en sala ${socket.roomId}`);
     
     const room = rooms.get(socket.roomId);
     if (!room) {
@@ -229,11 +229,19 @@ io.on('connection', (socket) => {
     
     if (room.players.size < 2) {
       console.log(`⚠️ No hay suficientes jugadores (${room.players.size}/2)`);
+      socket.emit('error', { message: 'Se necesitan 2 jugadores para comenzar' });
+      return;
+    }
+
+    if (room.roundActive) {
+      console.log(`⚠️ Ya hay una ronda activa en sala ${socket.roomId}`);
       return;
     }
     
     room.startNewRound();
-    console.log(`🎨 Nueva ronda iniciada en ${socket.roomId}, dibujante: ${room.currentDrawer}, palabra: ${room.currentWord}`);
+    console.log(`🎨 Nueva ronda iniciada en ${socket.roomId}`);
+    console.log(`   Dibujante: ${room.currentDrawer}`);
+    console.log(`   Palabra: ${room.currentWord}`);
     
     // Enviar palabra al dibujante
     const drawerSocket = Array.from(io.sockets.sockets.values())
@@ -241,17 +249,22 @@ io.on('connection', (socket) => {
     
     if (drawerSocket) {
       drawerSocket.emit('your_turn', { word: room.currentWord });
-      console.log(`📨 Palabra enviada al dibujante: ${room.currentWord}`);
+      console.log(`📨 Palabra "${room.currentWord}" enviada a ${room.currentDrawer}`);
+    } else {
+      console.log(`⚠️ No se encontró socket del dibujante ${room.currentDrawer}`);
     }
     
-    // Notificar a todos
-    io.to(socket.roomId).emit('round_started', {
+    // Notificar a todos sobre la ronda
+    const roundData = {
       drawer: room.currentDrawer,
-      drawerName: room.players.get(room.currentDrawer)?.name,
+      drawerName: room.players.get(room.currentDrawer)?.name || 'Jugador',
       hiddenWord: room.getHiddenWord(),
       roundNumber: room.roundNumber,
       timeLimit: ROUND_TIME
-    });
+    };
+    
+    console.log(`📤 Enviando round_started a sala ${socket.roomId}:`, roundData);
+    io.to(socket.roomId).emit('round_started', roundData);
     
     // Timer automático
     setTimeout(() => {
