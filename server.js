@@ -1,3 +1,4 @@
+// server.js - Servidor para Render.com
 const express = require('express');
 const http = require('http');
 const socketIO = require('socket.io');
@@ -11,441 +12,264 @@ const io = socketIO(server, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"]
-  },
-  pingTimeout: 60000,
-  pingInterval: 25000
+  }
 });
 
 const PORT = process.env.PORT || 3000;
 
-// Pool de palabras en español
-const WORD_POOL = [
-  'gato', 'perro', 'casa', 'árbol', 'sol', 'luna', 'estrella', 'flor',
-  'corazón', 'amor', 'beso', 'abrazo', 'sonrisa', 'lágrima', 'mano',
-  'ojo', 'boca', 'nariz', 'oreja', 'cabeza', 'teléfono', 'computadora',
-  'carro', 'bicicleta', 'avión', 'barco', 'tren', 'libro', 'lápiz',
-  'taza', 'plato', 'cuchara', 'tenedor', 'cuchillo', 'silla', 'mesa',
-  'puerta', 'ventana', 'cama', 'almohada', 'zapato', 'camisa', 'pantalón',
-  'sombrero', 'gafas', 'reloj', 'anillo', 'collar', 'pelota', 'juguete',
-  'guitarra', 'piano', 'tambor', 'micrófono', 'cámara', 'televisor',
-  'montaña', 'río', 'playa', 'nube', 'rayo', 'lluvia', 'nieve', 'arcoíris',
-  'mariposa', 'pájaro', 'pez', 'elefante', 'león', 'jirafa', 'pingüino',
-  'ballena', 'tiburón', 'delfín', 'tortuga', 'serpiente', 'araña',
-  'pizza', 'hamburguesa', 'helado', 'pastel', 'galleta', 'chocolate',
-  'manzana', 'banana', 'uva', 'fresa', 'sandía', 'piña', 'naranja',
-  'café', 'té', 'agua', 'jugo', 'leche', 'pan', 'queso', 'huevo'
-];
-
-const ROUND_TIME = 90; // 90 segundos por ronda
-const POINTS_FOR_GUESS = 100;
-
-// Estructura de datos
+// Almacenamiento de salas
 const rooms = new Map();
 
+// Palabras en español para el juego
+const palabras = [
+  'gato', 'perro', 'casa', 'sol', 'luna', 'árbol', 'flor', 'corazón',
+  'estrella', 'montaña', 'playa', 'avión', 'coche', 'bicicleta', 'libro',
+  'teléfono', 'computadora', 'guitarra', 'piano', 'cámara', 'reloj',
+  'zapato', 'sombrero', 'paraguas', 'llave', 'puerta', 'ventana',
+  'mesa', 'silla', 'cama', 'taza', 'plato', 'tenedor', 'cuchillo',
+  'manzana', 'banana', 'naranja', 'uva', 'fresa', 'sandía', 'piña'
+];
+
 class Room {
-  constructor(roomId, creatorId, creatorName) {
+  constructor(roomId) {
     this.roomId = roomId;
     this.players = new Map();
     this.currentDrawer = null;
     this.currentWord = null;
-    this.roundStartTime = null;
-    this.roundActive = false;
-    this.drawingData = [];
-    this.guessedPlayers = new Set();
-    this.roundNumber = 0;
-    
-    // Agregar creador
-    this.addPlayer(creatorId, creatorName);
+    this.gameStarted = false;
+    this.canvas = [];
+    this.round = 0;
+    this.maxRounds = 3;
+    this.roundTime = 60;
+    this.timeLeft = this.roundTime;
+    this.timer = null;
+    this.wordRevealed = false;
   }
 
-  addPlayer(playerId, playerName) {
-    this.players.set(playerId, {
-      id: playerId,
+  addPlayer(socketId, playerName) {
+    this.players.set(socketId, {
+      id: socketId,
       name: playerName,
       score: 0,
-      isReady: false
+      guessed: false
     });
   }
 
-  removePlayer(playerId) {
-    this.players.delete(playerId);
-  }
-
-  getNextDrawer() {
-    const playerIds = Array.from(this.players.keys());
-    if (playerIds.length === 0) return null;
-    
-    if (!this.currentDrawer) {
-      return playerIds[0];
+  removePlayer(socketId) {
+    this.players.delete(socketId);
+    if (this.currentDrawer === socketId) {
+      this.nextRound();
     }
+  }
+
+  startGame() {
+    if (this.players.size < 2) return false;
+    this.gameStarted = true;
+    this.round = 0;
+    this.nextRound();
+    return true;
+  }
+
+  nextRound() {
+    this.round++;
+    if (this.round > this.maxRounds) {
+      this.endGame();
+      return;
+    }
+
+    // Reset
+    this.canvas = [];
+    this.wordRevealed = false;
+    this.players.forEach(p => p.guessed = false);
+
+    // Seleccionar dibujante
+    const playerIds = Array.from(this.players.keys());
+    const drawerIndex = (this.round - 1) % playerIds.length;
+    this.currentDrawer = playerIds[drawerIndex];
+
+    // Seleccionar palabra
+    this.currentWord = palabras[Math.floor(Math.random() * palabras.length)];
+
+    // Iniciar timer
+    this.timeLeft = this.roundTime;
+    this.startTimer();
+  }
+
+  startTimer() {
+    if (this.timer) clearInterval(this.timer);
     
-    const currentIndex = playerIds.indexOf(this.currentDrawer);
-    const nextIndex = (currentIndex + 1) % playerIds.length;
-    return playerIds[nextIndex];
+    this.timer = setInterval(() => {
+      this.timeLeft--;
+      
+      if (this.timeLeft <= 0) {
+        this.revealWord();
+        clearInterval(this.timer);
+        setTimeout(() => this.nextRound(), 3000);
+      }
+    }, 1000);
   }
 
-  selectRandomWord() {
-    return WORD_POOL[Math.floor(Math.random() * WORD_POOL.length)];
+  revealWord() {
+    this.wordRevealed = true;
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
   }
 
-  startNewRound() {
-    this.currentDrawer = this.getNextDrawer();
-    this.currentWord = this.selectRandomWord();
-    this.roundStartTime = Date.now();
-    this.roundActive = true;
-    this.drawingData = [];
-    this.guessedPlayers.clear();
-    this.roundNumber++;
-  }
+  checkGuess(socketId, guess) {
+    const player = this.players.get(socketId);
+    if (!player || player.guessed || socketId === this.currentDrawer) {
+      return false;
+    }
 
-  endRound() {
-    this.roundActive = false;
-    this.currentWord = null;
-    this.currentDrawer = null;
-    this.drawingData = [];
-    this.guessedPlayers.clear();
-  }
-
-  checkGuess(playerId, guess) {
-    if (!this.currentWord || !this.roundActive) return false;
-    if (playerId === this.currentDrawer) return false;
-    if (this.guessedPlayers.has(playerId)) return false;
-    
     const normalizedGuess = guess.toLowerCase().trim();
     const normalizedWord = this.currentWord.toLowerCase().trim();
-    
+
     if (normalizedGuess === normalizedWord) {
-      this.guessedPlayers.add(playerId);
+      player.guessed = true;
       
-      // Otorgar puntos
-      const player = this.players.get(playerId);
-      if (player) {
-        const timeElapsed = (Date.now() - this.roundStartTime) / 1000;
-        const timeBonus = Math.max(0, Math.floor((ROUND_TIME - timeElapsed) / 10) * 10);
-        const points = POINTS_FOR_GUESS + timeBonus;
-        player.score += points;
-        
-        return { correct: true, points, playerName: player.name };
+      // Calcular puntos basados en tiempo restante
+      const basePoints = 100;
+      const timeBonus = Math.floor((this.timeLeft / this.roundTime) * 50);
+      player.score += basePoints + timeBonus;
+
+      // Dar puntos al dibujante
+      const drawer = this.players.get(this.currentDrawer);
+      if (drawer) {
+        drawer.score += 25;
       }
+
+      // Si todos adivinaron, siguiente ronda
+      const allGuessed = Array.from(this.players.values())
+        .filter(p => p.id !== this.currentDrawer)
+        .every(p => p.guessed);
+
+      if (allGuessed) {
+        this.revealWord();
+        setTimeout(() => this.nextRound(), 3000);
+      }
+
+      return true;
     }
-    
-    return { correct: false };
+
+    return false;
   }
 
-  getRoomState() {
+  endGame() {
+    this.gameStarted = false;
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  getState() {
     return {
-      roomId: this.roomId,
       players: Array.from(this.players.values()),
       currentDrawer: this.currentDrawer,
-      currentWord: this.currentDrawer ? this.getHiddenWord() : null,
-      roundActive: this.roundActive,
-      roundNumber: this.roundNumber,
-      roundStartTime: this.roundStartTime,
-      playerCount: this.players.size
+      gameStarted: this.gameStarted,
+      round: this.round,
+      maxRounds: this.maxRounds,
+      timeLeft: this.timeLeft,
+      canvas: this.canvas,
+      wordLength: this.currentWord ? this.currentWord.length : 0,
+      wordRevealed: this.wordRevealed,
+      revealedWord: this.wordRevealed ? this.currentWord : null
     };
   }
-
-  getHiddenWord() {
-    if (!this.currentWord) return null;
-    return this.currentWord.replace(/[a-záéíóúñ]/gi, '_');
-  }
-
-  toJSON() {
-    return this.getRoomState();
-  }
 }
-
-// Rutas básicas
-app.get('/', (req, res) => {
-  res.json({ 
-    status: 'Draw & Guess Server Online',
-    rooms: rooms.size,
-    timestamp: new Date().toISOString()
-  });
-});
-
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
-});
 
 // Socket.IO eventos
 io.on('connection', (socket) => {
-  console.log('🔌 Cliente conectado:', socket.id);
+  console.log('Cliente conectado:', socket.id);
 
-  // Crear o unirse a sala
-  socket.on('join_room', ({ roomId, playerId, playerName }) => {
-    console.log(`🎮 ${playerName} (${playerId}) intentando unirse a sala: ${roomId}`);
-    
-    // ⚠️ CRÍTICO: Asignar ANTES de hacer cualquier cosa
-    socket.roomId = roomId;
-    socket.playerId = playerId;
-    socket.playerName = playerName;
-    
-    let room = rooms.get(roomId);
-    
-    if (!room) {
-      // Crear nueva sala
-      room = new Room(roomId, playerId, playerName);
-      rooms.set(roomId, room);
-      console.log(`✨ Nueva sala creada: ${roomId}`);
-    } else if (room.players.size >= 2 && !room.players.has(playerId)) {
-      // Sala llena (pero permitir reconexión)
-      console.log(`⛔ Sala llena: ${roomId}`);
-      socket.emit('room_full');
-      return;
-    } else if (!room.players.has(playerId)) {
-      // Unirse a sala existente
-      room.addPlayer(playerId, playerName);
-      console.log(`➕ ${playerName} se unió a sala: ${roomId}`);
-    } else {
-      // Reconexión de jugador existente
-      console.log(`🔄 ${playerName} se reconectó a sala: ${roomId}`);
-    }
-    
-    // Unirse a la sala de Socket.IO
+  socket.on('join-room', ({ roomId, playerName }) => {
     socket.join(roomId);
-    
-    // ⚠️ IMPORTANTE: Enviar estado de la sala inmediatamente
-    const roomState = room.getRoomState();
-    console.log(`📤 Enviando room_state a sala ${roomId}:`, roomState);
-    io.to(roomId).emit('room_state', roomState);
-    
-    // Si hay 2 jugadores, notificar que pueden empezar
-    if (room.players.size === 2) {
-      console.log(`✅ Sala ${roomId} lista para empezar (2 jugadores)`);
-      io.to(roomId).emit('ready_to_start');
+
+    if (!rooms.has(roomId)) {
+      rooms.set(roomId, new Room(roomId));
     }
+
+    const room = rooms.get(roomId);
+    room.addPlayer(socket.id, playerName);
+
+    socket.emit('joined-room', { roomId, playerId: socket.id });
+    io.to(roomId).emit('room-state', room.getState());
+
+    console.log(`${playerName} se unió a ${roomId}`);
   });
 
-  // Iniciar juego
-  socket.on('start_game', () => {
-    console.log(`🎮 start_game recibido de ${socket.playerId} en sala ${socket.roomId}`);
-    
-    const room = rooms.get(socket.roomId);
-    if (!room) {
-      console.log(`⚠️ Sala no encontrada: ${socket.roomId}`);
-      return;
-    }
-    
-    if (room.players.size < 2) {
-      console.log(`⚠️ No hay suficientes jugadores (${room.players.size}/2)`);
-      socket.emit('error', { message: 'Se necesitan 2 jugadores para comenzar' });
-      return;
-    }
-
-    if (room.roundActive) {
-      console.log(`⚠️ Ya hay una ronda activa en sala ${socket.roomId}`);
-      return;
-    }
-    
-    room.startNewRound();
-    console.log(`🎨 Nueva ronda iniciada en ${socket.roomId}`);
-    console.log(`   Dibujante: ${room.currentDrawer}`);
-    console.log(`   Palabra: ${room.currentWord}`);
-    
-    // Enviar palabra al dibujante
-    const drawerSocket = Array.from(io.sockets.sockets.values())
-      .find(s => s.playerId === room.currentDrawer && s.roomId === socket.roomId);
-    
-    if (drawerSocket) {
-      drawerSocket.emit('your_turn', { word: room.currentWord });
-      console.log(`📨 Palabra "${room.currentWord}" enviada a ${room.currentDrawer}`);
-    } else {
-      console.log(`⚠️ No se encontró socket del dibujante ${room.currentDrawer}`);
-    }
-    
-    // Notificar a todos sobre la ronda
-    const roundData = {
-      drawer: room.currentDrawer,
-      drawerName: room.players.get(room.currentDrawer)?.name || 'Jugador',
-      hiddenWord: room.getHiddenWord(),
-      roundNumber: room.roundNumber,
-      timeLimit: ROUND_TIME
-    };
-    
-    console.log(`📤 Enviando round_started a sala ${socket.roomId}:`, roundData);
-    io.to(socket.roomId).emit('round_started', roundData);
-    
-    // Timer automático
-    setTimeout(() => {
-      const currentRoom = rooms.get(socket.roomId);
-      if (currentRoom && currentRoom.roundActive) {
-        console.log(`⏰ Tiempo agotado en sala ${socket.roomId}`);
-        currentRoom.endRound();
-        io.to(socket.roomId).emit('round_ended', {
-          word: currentRoom.currentWord || 'N/A',
-          scores: Array.from(currentRoom.players.values())
-        });
-      }
-    }, ROUND_TIME * 1000);
-  });
-
-  // Datos de dibujo (optimizado)
-  socket.on('draw', (data) => {
-    const room = rooms.get(socket.roomId);
-    if (!room || socket.playerId !== room.currentDrawer) return;
-    
-    // Broadcast a todos excepto al emisor
-    socket.to(socket.roomId).emit('draw', data);
-  });
-
-  // Limpiar canvas
-  socket.on('clear_canvas', () => {
-    const room = rooms.get(socket.roomId);
-    if (!room || socket.playerId !== room.currentDrawer) return;
-    
-    room.drawingData = [];
-    console.log(`🧹 Canvas limpiado en sala ${socket.roomId}`);
-    io.to(socket.roomId).emit('clear_canvas');
-  });
-
-  // Chat y adivinanzas
-  socket.on('send_message', ({ message }) => {
-    const room = rooms.get(socket.roomId);
-    if (!room) return;
-    
-    const player = room.players.get(socket.playerId);
-    if (!player) return;
-    
-    console.log(`💬 Mensaje de ${player.name}: ${message}`);
-    
-    // Verificar si es una adivinanza
-    const guessResult = room.checkGuess(socket.playerId, message);
-    
-    if (guessResult.correct) {
-      // Adivinanza correcta
-      console.log(`✅ ${player.name} adivinó correctamente!`);
-      io.to(socket.roomId).emit('correct_guess', {
-        playerId: socket.playerId,
-        playerName: player.name,
-        points: guessResult.points
-      });
+  socket.on('start-game', ({ roomId }) => {
+    const room = rooms.get(roomId);
+    if (room && room.startGame()) {
+      io.to(roomId).emit('game-started');
+      io.to(roomId).emit('room-state', room.getState());
       
-      io.to(socket.roomId).emit('room_state', room.getRoomState());
+      // Enviar palabra al dibujante
+      io.to(room.currentDrawer).emit('your-word', { word: room.currentWord });
+    }
+  });
+
+  socket.on('draw', ({ roomId, drawData }) => {
+    const room = rooms.get(roomId);
+    if (room && socket.id === room.currentDrawer) {
+      room.canvas.push(drawData);
+      socket.to(roomId).emit('draw-update', drawData);
+    }
+  });
+
+  socket.on('clear-canvas', ({ roomId }) => {
+    const room = rooms.get(roomId);
+    if (room && socket.id === room.currentDrawer) {
+      room.canvas = [];
+      io.to(roomId).emit('canvas-cleared');
+    }
+  });
+
+  socket.on('guess', ({ roomId, guess }) => {
+    const room = rooms.get(roomId);
+    if (room && room.gameStarted) {
+      const correct = room.checkGuess(socket.id, guess);
       
-      // Si todos adivinaron, terminar ronda
-      const nonDrawers = room.players.size - 1;
-      if (room.guessedPlayers.size >= nonDrawers && nonDrawers > 0) {
-        console.log(`🏁 Todos adivinaron en sala ${socket.roomId}`);
-        room.endRound();
-        io.to(socket.roomId).emit('round_ended', {
-          word: room.currentWord,
-          scores: Array.from(room.players.values()),
-          reason: 'all_guessed'
+      if (correct) {
+        const player = room.players.get(socket.id);
+        io.to(roomId).emit('correct-guess', { 
+          playerId: socket.id, 
+          playerName: player.name,
+          score: player.score
+        });
+        io.to(roomId).emit('room-state', room.getState());
+      } else {
+        io.to(roomId).emit('chat-message', {
+          playerId: socket.id,
+          playerName: room.players.get(socket.id).name,
+          message: guess
         });
       }
-    } else {
-      // Mensaje normal de chat
-      io.to(socket.roomId).emit('chat_message', {
-        playerId: socket.playerId,
-        playerName: player.name,
-        message: message,
-        timestamp: Date.now()
-      });
     }
   });
 
-  // Siguiente ronda
-  socket.on('next_round', () => {
-    console.log(`➡️ next_round recibido de ${socket.playerId}`);
-    
-    const room = rooms.get(socket.roomId);
-    if (!room) return;
-    
-    room.startNewRound();
-    console.log(`🎨 Nueva ronda en ${socket.roomId}, dibujante: ${room.currentDrawer}, palabra: ${room.currentWord}`);
-    
-    // Enviar palabra al nuevo dibujante
-    const drawerSocket = Array.from(io.sockets.sockets.values())
-      .find(s => s.playerId === room.currentDrawer && s.roomId === socket.roomId);
-    
-    if (drawerSocket) {
-      drawerSocket.emit('your_turn', { word: room.currentWord });
+  socket.on('timer-update', ({ roomId }) => {
+    const room = rooms.get(roomId);
+    if (room) {
+      io.to(roomId).emit('timer', { timeLeft: room.timeLeft });
     }
-    
-    // Notificar a todos
-    io.to(socket.roomId).emit('round_started', {
-      drawer: room.currentDrawer,
-      drawerName: room.players.get(room.currentDrawer)?.name,
-      hiddenWord: room.getHiddenWord(),
-      roundNumber: room.roundNumber,
-      timeLimit: ROUND_TIME
-    });
-    
-    // Timer automático
-    setTimeout(() => {
-      const currentRoom = rooms.get(socket.roomId);
-      if (currentRoom && currentRoom.roundActive) {
-        console.log(`⏰ Tiempo agotado en sala ${socket.roomId}`);
-        currentRoom.endRound();
-        io.to(socket.roomId).emit('round_ended', {
-          word: currentRoom.currentWord || 'N/A',
-          scores: Array.from(currentRoom.players.values())
-        });
-      }
-    }, ROUND_TIME * 1000);
   });
 
-  // Salir de sala
-  socket.on('leave_room', () => {
-    console.log(`👋 leave_room recibido de ${socket.playerId}`);
-    handleDisconnect(socket);
-  });
-
-  // Desconexión
   socket.on('disconnect', () => {
-    console.log('⚠️ Cliente desconectado:', socket.id);
-    handleDisconnect(socket);
-  });
-});
+    console.log('Cliente desconectado:', socket.id);
 
-function handleDisconnect(socket) {
-  if (!socket.roomId) return;
-  
-  const room = rooms.get(socket.roomId);
-  if (!room) return;
-  
-  console.log(`👋 ${socket.playerName} salió de sala ${socket.roomId}`);
-  room.removePlayer(socket.playerId);
-  
-  // Si la sala está vacía, eliminarla
-  if (room.players.size === 0) {
-    rooms.delete(socket.roomId);
-    console.log(`🗑️ Sala eliminada: ${socket.roomId}`);
-    return;
-  }
-  
-  // Si queda solo 1 jugador y hay ronda activa, terminarla
-  if (room.players.size === 1 && room.roundActive) {
-    console.log(`⚠️ Solo queda 1 jugador, terminando ronda en ${socket.roomId}`);
-    room.endRound();
-    io.to(socket.roomId).emit('round_ended', {
-      word: room.currentWord || 'N/A',
-      scores: Array.from(room.players.values()),
-      reason: 'player_left'
+    rooms.forEach((room, roomId) => {
+      if (room.players.has(socket.id)) {
+        room.removePlayer(socket.id);
+        
+        if (room.players.size === 0) {
+          rooms.delete(roomId);
+        } else {
+          io.to(roomId).emit('room-state', room.getState());
+        }
+      }
     });
-  }
-  
-  // Notificar a los demás
-  io.to(socket.roomId).emit('player_left', {
-    playerId: socket.playerId,
-    remainingPlayers: room.players.size
   });
-  
-  io.to(socket.roomId).emit('room_state', room.getRoomState());
-}
-
-// Limpieza periódica de salas vacías
-setInterval(() => {
-  for (const [roomId, room] of rooms.entries()) {
-    if (room.players.size === 0) {
-      rooms.delete(roomId);
-      console.log(`🧹 Sala limpiada: ${roomId}`);
-    }
-  }
-}, 300000); // Cada 5 minutos
-
-server.listen(PORT, () => {
-  console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
-  console.log(`📝 URL: http://localhost:${PORT}`);
 });
