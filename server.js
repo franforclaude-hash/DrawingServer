@@ -250,12 +250,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('timer-update', ({ roomId }) => {
-    const room = rooms.get(roomId);
-    if (room) {
-      io.to(roomId).emit('timer', { timeLeft: room.timeLeft });
-    }
-  });
+  // Timer se maneja automáticamente en el servidor, no desde cliente
 
   socket.on('disconnect', () => {
     console.log('Cliente desconectado:', socket.id);
