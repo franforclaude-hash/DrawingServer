@@ -1,4 +1,4 @@
-// server.js - Servidor para Render.com
+// server.js - Servidor actualizado con nuevas funcionalidades
 const express = require('express');
 const http = require('http');
 const socketIO = require('socket.io');
@@ -20,8 +20,8 @@ const PORT = process.env.PORT || 3000;
 // Almacenamiento de salas
 const rooms = new Map();
 
-// Palabras en español para el juego
-const palabras = [
+// Palabras en español por defecto
+const palabrasDefault = [
   'gato', 'perro', 'casa', 'sol', 'luna', 'árbol', 'flor', 'corazón',
   'estrella', 'montaña', 'playa', 'avión', 'coche', 'bicicleta', 'libro',
   'teléfono', 'computadora', 'guitarra', 'piano', 'cámara', 'reloj',
@@ -39,11 +39,15 @@ class Room {
     this.gameStarted = false;
     this.canvas = [];
     this.round = 0;
-    this.maxRounds = 3;
+    this.maxRounds = 5; // Cambiado a 5 rondas
     this.roundTime = 60;
     this.timeLeft = this.roundTime;
     this.timer = null;
     this.wordRevealed = false;
+    this.customWords = []; // Palabras personalizadas
+    this.hintGiven30 = false; // Pista a los 30 segundos
+    this.hintGiven15 = false; // Pista a los 15 segundos
+    this.revealedIndices = []; // Índices de letras reveladas
   }
 
   addPlayer(socketId, playerName) {
@@ -74,13 +78,15 @@ class Room {
     this.round++;
     if (this.round > this.maxRounds) {
       this.endGame();
-      io.to(this.roomId).emit('game-ended', this.getState());
       return;
     }
 
     // Reset
     this.canvas = [];
     this.wordRevealed = false;
+    this.hintGiven30 = false;
+    this.hintGiven15 = false;
+    this.revealedIndices = [];
     this.players.forEach(p => p.guessed = false);
 
     // Seleccionar dibujante
@@ -88,8 +94,11 @@ class Room {
     const drawerIndex = (this.round - 1) % playerIds.length;
     this.currentDrawer = playerIds[drawerIndex];
 
-    // Seleccionar palabra
-    this.currentWord = palabras[Math.floor(Math.random() * palabras.length)];
+    // Seleccionar palabra (primero personalizadas, luego por defecto)
+    const availableWords = this.customWords.length > 0 
+      ? this.customWords 
+      : palabrasDefault;
+    this.currentWord = availableWords[Math.floor(Math.random() * availableWords.length)];
 
     // Iniciar timer
     this.timeLeft = this.roundTime;
@@ -106,8 +115,20 @@ class Room {
     this.timer = setInterval(() => {
       this.timeLeft--;
       
-      // Emitir actualización de timer a todos en la sala
+      // Emitir actualización de timer
       io.to(this.roomId).emit('timer-tick', { timeLeft: this.timeLeft });
+      
+      // Dar pista a los 30 segundos
+      if (this.timeLeft === 30 && !this.hintGiven30) {
+        this.giveHint();
+        this.hintGiven30 = true;
+      }
+      
+      // Dar pista a los 15 segundos
+      if (this.timeLeft === 15 && !this.hintGiven15) {
+        this.giveHint();
+        this.hintGiven15 = true;
+      }
       
       if (this.timeLeft <= 0) {
         this.revealWord();
@@ -115,6 +136,36 @@ class Room {
         setTimeout(() => this.nextRound(), 3000);
       }
     }, 1000);
+  }
+
+  giveHint() {
+    if (!this.currentWord || this.revealedIndices.length >= this.currentWord.length) {
+      return;
+    }
+
+    // Obtener índices no revelados
+    const availableIndices = [];
+    for (let i = 0; i < this.currentWord.length; i++) {
+      if (!this.revealedIndices.includes(i)) {
+        availableIndices.push(i);
+      }
+    }
+
+    if (availableIndices.length === 0) return;
+
+    // Seleccionar un índice aleatorio
+    const randomIndex = availableIndices[Math.floor(Math.random() * availableIndices.length)];
+    this.revealedIndices.push(randomIndex);
+
+    // Emitir pista a todos los que NO son dibujantes
+    this.players.forEach((player, socketId) => {
+      if (socketId !== this.currentDrawer) {
+        io.to(socketId).emit('letter-hint', {
+          index: randomIndex,
+          letter: this.currentWord[randomIndex]
+        });
+      }
+    });
   }
 
   revealWord() {
@@ -170,6 +221,29 @@ class Room {
       clearInterval(this.timer);
       this.timer = null;
     }
+    io.to(this.roomId).emit('game-ended', this.getState());
+  }
+
+  updateWords(newWords) {
+    this.customWords = newWords;
+  }
+
+  resetForNewGame() {
+    this.round = 0;
+    this.gameStarted = false;
+    this.currentDrawer = null;
+    this.currentWord = null;
+    this.canvas = [];
+    this.wordRevealed = false;
+    this.hintGiven30 = false;
+    this.hintGiven15 = false;
+    this.revealedIndices = [];
+    
+    // Resetear puntos de jugadores
+    this.players.forEach(player => {
+      player.score = 0;
+      player.guessed = false;
+    });
   }
 
   getState() {
@@ -258,7 +332,25 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Timer se maneja automáticamente en el servidor, no desde cliente
+  // Actualizar palabras personalizadas
+  socket.on('update-words', ({ roomId, words }) => {
+    const room = rooms.get(roomId);
+    if (room) {
+      room.updateWords(words);
+      socket.emit('words-updated');
+      console.log(`Palabras actualizadas en ${roomId}:`, words);
+    }
+  });
+
+  // Jugar de nuevo
+  socket.on('play-again', ({ roomId }) => {
+    const room = rooms.get(roomId);
+    if (room) {
+      room.resetForNewGame();
+      io.to(roomId).emit('room-state', room.getState());
+      console.log(`Sala ${roomId} reiniciada para nuevo juego`);
+    }
+  });
 
   socket.on('disconnect', () => {
     console.log('Cliente desconectado:', socket.id);
@@ -279,13 +371,18 @@ io.on('connection', (socket) => {
 
 // Health check endpoint
 app.get('/', (req, res) => {
-  res.send('Draw & Guess Server Running');
+  res.send('Draw & Guess Server Running - v2.0');
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', rooms: rooms.size });
+  res.json({ 
+    status: 'ok', 
+    rooms: rooms.size,
+    version: '2.0'
+  });
 });
 
 server.listen(PORT, () => {
-  console.log(`Servidor corriendo en puerto ${PORT}`);
+  console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+  console.log(`📝 Funciones: Pistas automáticas, 5 rondas, palabras personalizadas`);
 });
