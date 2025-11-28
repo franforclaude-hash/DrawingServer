@@ -74,6 +74,7 @@ class Room {
     this.round++;
     if (this.round > this.maxRounds) {
       this.endGame();
+      io.to(this.roomId).emit('game-ended', this.getState());
       return;
     }
 
@@ -93,6 +94,10 @@ class Room {
     // Iniciar timer
     this.timeLeft = this.roundTime;
     this.startTimer();
+    
+    // Notificar nueva ronda
+    io.to(this.roomId).emit('new-round', this.getState());
+    io.to(this.currentDrawer).emit('your-word', { word: this.currentWord });
   }
 
   startTimer() {
@@ -100,6 +105,9 @@ class Room {
     
     this.timer = setInterval(() => {
       this.timeLeft--;
+      
+      // Emitir actualización de timer a todos en la sala
+      io.to(this.roomId).emit('timer-tick', { timeLeft: this.timeLeft });
       
       if (this.timeLeft <= 0) {
         this.revealWord();
