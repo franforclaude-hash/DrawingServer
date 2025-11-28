@@ -1,4 +1,4 @@
-// server.js - Servidor actualizado con nuevas funcionalidades
+// server.js - Servidor con palabras persistentes y dibujos guardados
 const express = require('express');
 const http = require('http');
 const socketIO = require('socket.io');
@@ -39,15 +39,17 @@ class Room {
     this.gameStarted = false;
     this.canvas = [];
     this.round = 0;
-    this.maxRounds = 5; // Cambiado a 5 rondas
+    this.maxRounds = 5;
     this.roundTime = 60;
     this.timeLeft = this.roundTime;
     this.timer = null;
     this.wordRevealed = false;
-    this.customWords = []; // Palabras personalizadas
-    this.hintGiven30 = false; // Pista a los 30 segundos
-    this.hintGiven15 = false; // Pista a los 15 segundos
-    this.revealedIndices = []; // Índices de letras reveladas
+    this.customWords = [];
+    this.hintGiven30 = false;
+    this.hintGiven15 = false;
+    this.revealedIndices = [];
+    this.roundDrawings = []; // Almacenar dibujos de cada ronda
+    this.allGameDrawings = []; // Todos los dibujos de la partida
   }
 
   addPlayer(socketId, playerName) {
@@ -70,11 +72,26 @@ class Room {
     if (this.players.size < 2) return false;
     this.gameStarted = true;
     this.round = 0;
+    this.allGameDrawings = [];
     this.nextRound();
     return true;
   }
 
   nextRound() {
+    // Guardar el dibujo de la ronda anterior si existe
+    if (this.canvas.length > 0 && this.currentWord) {
+      const roundDrawing = {
+        roundNumber: this.round,
+        word: this.currentWord,
+        drawing: [...this.canvas],
+        drawer: this.players.get(this.currentDrawer)?.name || 'Desconocido',
+        wasGuessed: Array.from(this.players.values())
+          .filter(p => p.id !== this.currentDrawer)
+          .some(p => p.guessed)
+      };
+      this.allGameDrawings.push(roundDrawing);
+    }
+
     this.round++;
     if (this.round > this.maxRounds) {
       this.endGame();
@@ -94,7 +111,7 @@ class Room {
     const drawerIndex = (this.round - 1) % playerIds.length;
     this.currentDrawer = playerIds[drawerIndex];
 
-    // Seleccionar palabra (primero personalizadas, luego por defecto)
+    // Seleccionar palabra
     const availableWords = this.customWords.length > 0 
       ? this.customWords 
       : palabrasDefault;
@@ -115,16 +132,13 @@ class Room {
     this.timer = setInterval(() => {
       this.timeLeft--;
       
-      // Emitir actualización de timer
       io.to(this.roomId).emit('timer-tick', { timeLeft: this.timeLeft });
       
-      // Dar pista a los 30 segundos
       if (this.timeLeft === 30 && !this.hintGiven30) {
         this.giveHint();
         this.hintGiven30 = true;
       }
       
-      // Dar pista a los 15 segundos
       if (this.timeLeft === 15 && !this.hintGiven15) {
         this.giveHint();
         this.hintGiven15 = true;
@@ -143,7 +157,6 @@ class Room {
       return;
     }
 
-    // Obtener índices no revelados
     const availableIndices = [];
     for (let i = 0; i < this.currentWord.length; i++) {
       if (!this.revealedIndices.includes(i)) {
@@ -153,7 +166,6 @@ class Room {
 
     if (availableIndices.length === 0) return;
 
-    // Seleccionar un índice aleatorio
     const randomIndex = availableIndices[Math.floor(Math.random() * availableIndices.length)];
     this.revealedIndices.push(randomIndex);
 
@@ -188,18 +200,15 @@ class Room {
     if (normalizedGuess === normalizedWord) {
       player.guessed = true;
       
-      // Calcular puntos basados en tiempo restante
       const basePoints = 100;
       const timeBonus = Math.floor((this.timeLeft / this.roundTime) * 50);
       player.score += basePoints + timeBonus;
 
-      // Dar puntos al dibujante
       const drawer = this.players.get(this.currentDrawer);
       if (drawer) {
         drawer.score += 25;
       }
 
-      // Si todos adivinaron, siguiente ronda
       const allGuessed = Array.from(this.players.values())
         .filter(p => p.id !== this.currentDrawer)
         .every(p => p.guessed);
@@ -221,11 +230,21 @@ class Room {
       clearInterval(this.timer);
       this.timer = null;
     }
-    io.to(this.roomId).emit('game-ended', this.getState());
+    
+    // Incluir dibujos en el estado final
+    io.to(this.roomId).emit('game-ended', {
+      ...this.getState(),
+      drawings: this.allGameDrawings
+    });
   }
 
   updateWords(newWords) {
     this.customWords = newWords;
+    console.log(`Palabras actualizadas en sala ${this.roomId}:`, newWords);
+  }
+
+  getWords() {
+    return this.customWords.length > 0 ? this.customWords : [];
   }
 
   resetForNewGame() {
@@ -238,8 +257,8 @@ class Room {
     this.hintGiven30 = false;
     this.hintGiven15 = false;
     this.revealedIndices = [];
+    this.allGameDrawings = [];
     
-    // Resetear puntos de jugadores
     this.players.forEach(player => {
       player.score = 0;
       player.guessed = false;
@@ -257,7 +276,8 @@ class Room {
       canvas: this.canvas,
       wordLength: this.currentWord ? this.currentWord.length : 0,
       wordRevealed: this.wordRevealed,
-      revealedWord: this.wordRevealed ? this.currentWord : null
+      revealedWord: this.wordRevealed ? this.currentWord : null,
+      customWords: this.customWords
     };
   }
 }
@@ -288,7 +308,6 @@ io.on('connection', (socket) => {
       io.to(roomId).emit('game-started');
       io.to(roomId).emit('room-state', room.getState());
       
-      // Enviar palabra al dibujante
       io.to(room.currentDrawer).emit('your-word', { word: room.currentWord });
     }
   });
@@ -321,6 +340,13 @@ io.on('connection', (socket) => {
           playerName: player.name,
           score: player.score
         });
+        
+        // Notificar al jugador que adivinó
+        io.to(socket.id).emit('you-guessed-correctly', {
+          message: '¡Adivinaste correctamente!',
+          points: player.score
+        });
+        
         io.to(roomId).emit('room-state', room.getState());
       } else {
         io.to(roomId).emit('chat-message', {
@@ -332,17 +358,23 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Actualizar palabras personalizadas
   socket.on('update-words', ({ roomId, words }) => {
     const room = rooms.get(roomId);
     if (room) {
       room.updateWords(words);
-      socket.emit('words-updated');
-      console.log(`Palabras actualizadas en ${roomId}:`, words);
+      // Enviar las palabras actualizadas a TODOS en la sala
+      io.to(roomId).emit('words-updated', { words: words });
+      console.log(`Palabras actualizadas y enviadas a sala ${roomId}:`, words);
     }
   });
 
-  // Jugar de nuevo
+  socket.on('get-words', ({ roomId }) => {
+    const room = rooms.get(roomId);
+    if (room) {
+      socket.emit('words-list', { words: room.getWords() });
+    }
+  });
+
   socket.on('play-again', ({ roomId }) => {
     const room = rooms.get(roomId);
     if (room) {
@@ -369,20 +401,19 @@ io.on('connection', (socket) => {
   });
 });
 
-// Health check endpoint
 app.get('/', (req, res) => {
-  res.send('Draw & Guess Server Running - v2.0');
+  res.send('Draw & Guess Server Running - v2.1');
 });
 
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     rooms: rooms.size,
-    version: '2.0'
+    version: '2.1'
   });
 });
 
 server.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
-  console.log(`📝 Funciones: Pistas automáticas, 5 rondas, palabras personalizadas`);
+  console.log(`📝 Funciones: Palabras persistentes, dibujos guardados, pistas`);
 });
