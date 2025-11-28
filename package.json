@@ -1,5 +1,5 @@
 {
-  "name": "draw-guess-server",
+  "name": "DrawingServer",
   "version": "1.0.0",
   "description": "Socket.IO server for Draw & Guess game",
   "main": "server.js",
