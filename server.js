@@ -273,3 +273,16 @@ io.on('connection', (socket) => {
     });
   });
 });
+
+// Health check endpoint
+app.get('/', (req, res) => {
+  res.send('Draw & Guess Server Running');
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', rooms: rooms.size });
+});
+
+server.listen(PORT, () => {
+  console.log(`Servidor corriendo en puerto ${PORT}`);
+});
