@@ -412,26 +412,27 @@ function handleDisconnect(socket) {
   if (room.players.size === 0) {
     rooms.delete(socket.roomId);
     console.log(`🗑️ Sala eliminada: ${socket.roomId}`);
-  } else {
-    // Notificar a los demás
-    io.to(socket.roomId).emit('player_left', {
-      playerId: socket.playerId,
-      remainingPlayers: room.players.size
-    });
-    
-    io.to(socket.roomId).emit('room_state', room.getRoomState());
-    
-    // Si el dibujante se fue, terminar ronda
-    if (room.currentDrawer === socket.playerId && room.roundActive) {
-      console.log(`🎨 El dibujante se fue, terminando ronda en ${socket.roomId}`);
-      room.endRound();
-      io.to(socket.roomId).emit('round_ended', {
-        word: room.currentWord,
-        scores: Array.from(room.players.values()),
-        reason: 'drawer_left'
-      });
-    }
+    return;
   }
+  
+  // Si queda solo 1 jugador y hay ronda activa, terminarla
+  if (room.players.size === 1 && room.roundActive) {
+    console.log(`⚠️ Solo queda 1 jugador, terminando ronda en ${socket.roomId}`);
+    room.endRound();
+    io.to(socket.roomId).emit('round_ended', {
+      word: room.currentWord || 'N/A',
+      scores: Array.from(room.players.values()),
+      reason: 'player_left'
+    });
+  }
+  
+  // Notificar a los demás
+  io.to(socket.roomId).emit('player_left', {
+    playerId: socket.playerId,
+    remainingPlayers: room.players.size
+  });
+  
+  io.to(socket.roomId).emit('room_state', room.getRoomState());
 }
 
 // Limpieza periódica de salas vacías
