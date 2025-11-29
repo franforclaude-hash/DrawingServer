@@ -202,7 +202,8 @@ class Room {
       
       const basePoints = 100;
       const timeBonus = Math.floor((this.timeLeft / this.roundTime) * 50);
-      player.score += basePoints + timeBonus;
+      const earnedPoints = basePoints + timeBonus;
+      player.score += earnedPoints;
 
       const drawer = this.players.get(this.currentDrawer);
       if (drawer) {
@@ -218,7 +219,7 @@ class Room {
         setTimeout(() => this.nextRound(), 3000);
       }
 
-      return true;
+      return earnedPoints; // Retornar puntos ganados
     }
 
     return false;
@@ -331,9 +332,9 @@ io.on('connection', (socket) => {
   socket.on('guess', ({ roomId, guess }) => {
     const room = rooms.get(roomId);
     if (room && room.gameStarted) {
-      const correct = room.checkGuess(socket.id, guess);
+      const result = room.checkGuess(socket.id, guess);
       
-      if (correct) {
+      if (result !== false) {
         const player = room.players.get(socket.id);
         io.to(roomId).emit('correct-guess', { 
           playerId: socket.id, 
@@ -341,10 +342,10 @@ io.on('connection', (socket) => {
           score: player.score
         });
         
-        // Notificar al jugador que adivinó
+        // Notificar al jugador que adivinó con los puntos correctos
         io.to(socket.id).emit('you-guessed-correctly', {
           message: '¡Adivinaste correctamente!',
-          points: player.score
+          points: result // Puntos ganados en esta ronda
         });
         
         io.to(roomId).emit('room-state', room.getState());
